@@ -62,6 +62,8 @@ function isPlausibleWebsite(value: string): boolean {
   return /^[a-z0-9-]+(\.[a-z0-9-]+)+([/?#].*)?$/i.test(stripped);
 }
 
+// --- Static data ---
+
 const industries = [
   ["HVAC",850,52],["Plumbing",475,55],["Electrical",650,48],["Roofing",9200,32],["Dumpster Rental",575,58],
   ["Landscaping",2400,38],["Pest Control",325,62],["Garage Door",725,51],["Auto Body",2800,43],["Towing",275,67],
@@ -85,6 +87,7 @@ const checks = [
 ] as const;
 
 type Answers = Record<string, boolean | null>;
+type Evidence = Record<string, string>;
 
 const DEFAULTS = {
   inquiries: 120,
@@ -94,18 +97,7 @@ const DEFAULTS = {
   closeRate: 52,
 };
 
-/**
- * Parse a <input type="number"> change event into a bounded number.
- * Returns `fallback` for empty strings or anything non-numeric instead
- * of letting NaN leak into state (which previously showed "NaN" in the
- * UI once it reached the calculation).
- */
-function parseBoundedNumber(
-  raw: string,
-  min: number,
-  max: number,
-  fallback: number,
-): number {
+function parseBoundedNumber(raw: string, min: number, max: number, fallback: number): number {
   if (raw.trim() === "") return fallback;
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
@@ -127,6 +119,10 @@ export default function Home() {
   const [answers, setAnswers] = useState<Answers>(() =>
     Object.fromEntries(checks.map((c) => [c[0], null])),
   );
+  const [evidence, setEvidence] = useState<Evidence>({});
+  const [scanState, setScanState] = useState<"idle" | "scanning" | "done" | "error">("idle");
+  const [scanError, setScanError] = useState<string | null>(null);
+
   const [emailOpen, setEmailOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [emailTouched, setEmailTouched] = useState(false);
@@ -136,14 +132,8 @@ export default function Home() {
   const websiteIsValid = isPlausibleWebsite(website);
   const emailIsValid = isValidEmail(email);
 
-  const failed = useMemo(
-    () => checks.filter((c) => answers[c[0]] === false),
-    [answers],
-  );
-  const answered = useMemo(
-    () => checks.filter((c) => answers[c[0]] !== null).length,
-    [answers],
-  );
+  const failed = useMemo(() => checks.filter((c) => answers[c[0]] === false), [answers]);
+  const answered = useMemo(() => checks.filter((c) => answers[c[0]] !== null).length, [answers]);
 
   const result = useMemo(
     () =>
@@ -183,19 +173,52 @@ export default function Home() {
     setFormHours(DEFAULTS.formHours);
     setCloseRate(DEFAULTS.closeRate);
     setAnswers(Object.fromEntries(checks.map((c) => [c[0], null])));
+    setEvidence({});
+    setScanState("idle");
+    setScanError(null);
     setEmail("");
     setEmailTouched(false);
     setReportSent("idle");
   }
 
-  /**
-   * Submits the captured email for the report gate. Wired to a same-origin
-   * API route so the "you agree to receive this report" copy in the modal
-   * is actually backed by something. Replace /api/report-lead with your
-   * real endpoint (Netlify Forms, CRM webhook, etc.) before launch — this
-   * fails gracefully (no crash, visible error state) if that route doesn't
-   * exist yet.
-   */
+  /** Actually scans the target site's HTML server-side and pre-fills answers. */
+  async function runScan() {
+    if (!websiteIsValid) return;
+    setScanState("scanning");
+    setScanError(null);
+    try {
+      const res = await fetch("/api/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: website }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setScanError(data.error ?? "Couldn't scan that site automatically.");
+        setScanState("error");
+        go(2, "scanner");
+        return;
+      }
+      const nextAnswers: Answers = { ...answers };
+      const nextEvidence: Evidence = {};
+      for (const check of checks) {
+        const finding = data.findings?.[check[0]];
+        if (finding) {
+          nextAnswers[check[0]] = finding.passed;
+          nextEvidence[check[0]] = finding.evidence;
+        }
+      }
+      setAnswers(nextAnswers);
+      setEvidence(nextEvidence);
+      setScanState("done");
+      go(2, "scanner");
+    } catch {
+      setScanError("Couldn't reach the scan service. You can still answer the checks manually below.");
+      setScanState("error");
+      go(2, "scanner");
+    }
+  }
+
   async function submitReportRequest() {
     if (!emailIsValid) return;
     setReportSent("sending");
@@ -203,22 +226,13 @@ export default function Home() {
       const res = await fetch("/api/report-lead", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email,
-          website,
-          industry,
-          score: result.score,
-          gap: result.gap,
-        }),
+        body: JSON.stringify({ email, website, industry, score: result.score, gap: result.gap }),
       });
       if (!res.ok) throw new Error(`Request failed: ${res.status}`);
       setReportSent("sent");
       setEmailOpen(false);
       setTimeout(() => window.print(), 100);
     } catch {
-      // Don't block the user from getting their printable report just
-      // because lead capture failed — but surface it instead of pretending
-      // it worked.
       setReportSent("error");
       setEmailOpen(false);
       setTimeout(() => window.print(), 100);
@@ -245,8 +259,8 @@ export default function Home() {
           <div className="eyebrow"><i />Built for local service businesses</div>
           <h1>Find where your website is <em>losing leads.</em></h1>
           <p className="lead">
-            A practical 3-minute scan that turns website friction, response gaps, and your
-            real business numbers into prioritized fixes.
+            A practical scan that actually checks your live site, then turns real business
+            numbers into prioritized fixes.
           </p>
           <div className="heroActions">
             <a className="primary" href="#scanner">Scan my website <span>→</span></a>
@@ -285,7 +299,7 @@ export default function Home() {
         <div className="shell proofGrid">
           <div><b>10</b><span>lead-conversion checks</span></div>
           <div><b>30</b><span>service industries</span></div>
-          <div><b>3 min</b><span>to your action plan</span></div>
+          <div><b>Live</b><span>site scan, not guesswork</span></div>
           <div><b>100%</b><span>assumptions disclosed</span></div>
         </div>
       </section>
@@ -324,9 +338,7 @@ export default function Home() {
                   />
                 </div>
                 {websiteTouched && website.trim() !== "" && !websiteIsValid && (
-                  <small style={{ color: "#a84d19" }}>
-                    Enter a website like yourbusiness.com
-                  </small>
+                  <small style={{ color: "#a84d19" }}>Enter a website like yourbusiness.com</small>
                 )}
               </div>
 
@@ -419,10 +431,10 @@ export default function Home() {
 
               <button
                 className="primary scanBtn"
-                onClick={() => websiteIsValid && go(2, "scanner")}
-                disabled={!websiteIsValid}
+                onClick={runScan}
+                disabled={!websiteIsValid || scanState === "scanning"}
               >
-                Continue to website checks <span>→</span>
+                {scanState === "scanning" ? "Scanning your site…" : "Scan my website"} <span>→</span>
               </button>
               <p className="privacy">🔒 Your inputs stay in this browser unless you choose to submit the report form.</p>
             </div>
@@ -432,20 +444,42 @@ export default function Home() {
             <div className="checkPanel">
               <div className="checkHeader">
                 <div>
-                  <span className="kicker">QUICK REVIEW</span>
-                  <h3>Answer what you can see.</h3>
+                  <span className="kicker">{scanState === "done" ? "SCAN RESULTS" : "QUICK REVIEW"}</span>
+                  <h3>
+                    {scanState === "done"
+                      ? "Here's what we found automatically."
+                      : "Answer what you can see."}
+                  </h3>
                 </div>
                 <div><b>{answered}/{checks.length}</b><span>complete</span></div>
               </div>
-              <p className="muted">
-                This guided scan does not automatically crawl or test your website. Check the site
-                before choosing an answer.
-              </p>
+
+              {scanState === "error" && scanError && (
+                <p className="muted" style={{ color: "#a84d19" }}>
+                  ⚠ {scanError}
+                </p>
+              )}
+              {scanState === "done" && (
+                <p className="muted">
+                  We scanned your site's HTML automatically. Some checks (marked below) can't be
+                  fully verified this way — review those and adjust anything that looks off.
+                </p>
+              )}
+              {scanState !== "done" && scanState !== "error" && (
+                <p className="muted">
+                  This scan doesn't automatically crawl your website. Check the site before
+                  choosing an answer.
+                </p>
+              )}
+
               <div className="checkList">
                 {checks.map((c, i) => (
                   <div className="checkRow" key={c[0]}>
                     <b>{String(i + 1).padStart(2, "0")}</b>
-                    <div><strong>{c[1]}</strong><span>{c[2]}</span></div>
+                    <div>
+                      <strong>{c[1]}</strong>
+                      <span>{evidence[c[0]] ?? c[2]}</span>
+                    </div>
                     <div className="choice" role="group" aria-label={c[1]}>
                       <button
                         type="button"
@@ -560,13 +594,13 @@ export default function Home() {
           <div className="sectionIntro light">
             <div>
               <span className="kicker">HOW IT WORKS</span>
-              <h2>A useful estimate, not a scare tactic.</h2>
+              <h2>A real scan, not a scare tactic.</h2>
             </div>
-            <p>LeadGapScan separates your inputs, visible website signals, and calculation assumptions.</p>
+            <p>LeadGapScan fetches your live site, checks what it can automatically, and is upfront about the rest.</p>
           </div>
           <div className="howGrid">
             <article><b>01</b><h3>Add real inputs</h3><p>Use monthly inquiries, average job value, answer rate, response time, and close rate.</p></article>
-            <article><b>02</b><h3>Review friction</h3><p>Complete ten practical checks covering calls, forms, mobile use, trust, and local signals.</p></article>
+            <article><b>02</b><h3>Automatic + manual checks</h3><p>We scan your live site's HTML for what we can detect, and flag anything you should verify yourself.</p></article>
             <article><b>03</b><h3>Prioritize fixes</h3><p>See the estimated exposure, the formula behind it, and the next actions worth testing.</p></article>
           </div>
         </div>
