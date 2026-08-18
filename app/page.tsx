@@ -1,6 +1,66 @@
- "use client";
+"use client";
 import { useMemo, useState } from "react";
-import { calculateLeadGap, isPlausibleWebsite, isValidEmail } from "@/lib/calc";
+
+// --- Calculation logic (kept in this file so there's nothing else to wire up) ---
+
+type CalcInputs = {
+  inquiries: number;
+  avgJob: number;
+  closeRate: number;
+  answerRate: number;
+  formHours: number;
+  failedCount: number;
+};
+
+function clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+function sanitizeInputs(raw: Partial<CalcInputs>): CalcInputs {
+  return {
+    inquiries: clampNumber(raw.inquiries ?? NaN, 0, 1_000_000, 0),
+    avgJob: clampNumber(raw.avgJob ?? NaN, 0, 10_000_000, 0),
+    closeRate: clampNumber(raw.closeRate ?? NaN, 0, 100, 0),
+    answerRate: clampNumber(raw.answerRate ?? NaN, 0, 100, 0),
+    formHours: clampNumber(raw.formHours ?? NaN, 0, 24 * 30, 0),
+    failedCount: clampNumber(raw.failedCount ?? NaN, 0, 10, 0),
+  };
+}
+
+function calculateLeadGap(raw: Partial<CalcInputs>) {
+  const { inquiries, avgJob, closeRate, answerRate, formHours, failedCount } = sanitizeInputs(raw);
+
+  const callGap = inquiries * 0.65 * Math.max(0, 1 - answerRate / 100) * 0.7;
+
+  const responsePenalty =
+    formHours <= 1 ? 0.02 : formHours <= 4 ? 0.08 : formHours <= 24 ? 0.18 : 0.28;
+  const formGap = inquiries * 0.35 * responsePenalty;
+
+  const issueGap = inquiries * Math.min(0.12, failedCount * 0.018) * 0.6;
+
+  const gap = Math.min(inquiries * 0.35, callGap + formGap + issueGap);
+
+  const jobs = (gap * closeRate) / 100;
+  const revenue = jobs * avgJob;
+
+  const rawScore = 100 - failedCount * 6.5 - (100 - answerRate) * 0.28 - responsePenalty * 34;
+  const score = Math.max(22, Math.min(100, Math.round(rawScore)));
+
+  return { callGap, formGap, issueGap, gap, jobs, revenue, score };
+}
+
+function isValidEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value.trim());
+}
+
+function isPlausibleWebsite(value: string): boolean {
+  const v = value.trim();
+  if (!v) return false;
+  if (/\s/.test(v)) return false;
+  const stripped = v.replace(/^https?:\/\//i, "").replace(/^www\./i, "");
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)+([/?#].*)?$/i.test(stripped);
+}
 
 const industries = [
   ["HVAC",850,52],["Plumbing",475,55],["Electrical",650,48],["Roofing",9200,32],["Dumpster Rental",575,58],
